@@ -161,6 +161,12 @@ EXPECTED_JSON = {
         {
             "children": [
                 {
+                    "id": "group234.task2",
+                    "label": "task2",
+                    "operator": "EmptyOperator",
+                    "type": "task",
+                },
+                {
                     "children": [
                         {
                             "id": "group234.group34.task3",
@@ -180,12 +186,6 @@ EXPECTED_JSON = {
                     "is_mapped": False,
                     "label": "group34",
                     "tooltip": "",
-                    "type": "task",
-                },
-                {
-                    "id": "group234.task2",
-                    "label": "task2",
-                    "operator": "EmptyOperator",
                     "type": "task",
                 },
                 {"id": "group234.upstream_join_id", "label": "", "type": "join"},
@@ -299,20 +299,20 @@ def test_task_group_to_dict_with_prefix(dag_maker):
                 "id": "group234",
                 "label": "group234",
                 "children": [
+                    {"id": "task2", "label": "task2"},
                     {
                         "children": [
+                            {"id": "group34.task3", "label": "task3"},
                             {
                                 "children": [{"id": "task4", "label": "task4"}],
                                 "id": "group34.group4",
                                 "label": "group4",
                             },
-                            {"id": "group34.task3", "label": "task3"},
                             {"id": "group34.downstream_join_id", "label": ""},
                         ],
                         "id": "group34",
                         "label": "group34",
                     },
-                    {"id": "task2", "label": "task2"},
                     {"id": "group234.upstream_join_id", "label": ""},
                 ],
             },
@@ -496,14 +496,6 @@ def test_task_group_to_dict_and_dag_edges(dag_maker):
     expected_node_id = {
         "id": None,
         "children": [
-            {
-                "id": "group_d",
-                "children": [
-                    {"id": "group_d.task11"},
-                    {"id": "group_d.task12"},
-                    {"id": "group_d.upstream_join_id"},
-                ],
-            },
             {"id": "task1"},
             {
                 "id": "group_a",
@@ -532,8 +524,16 @@ def test_task_group_to_dict_and_dag_edges(dag_maker):
                     {"id": "group_c.downstream_join_id"},
                 ],
             },
-            {"id": "task10"},
             {"id": "task9"},
+            {"id": "task10"},
+            {
+                "id": "group_d",
+                "children": [
+                    {"id": "group_d.task11"},
+                    {"id": "group_d.task12"},
+                    {"id": "group_d.upstream_join_id"},
+                ],
+            },
         ],
     }
 
@@ -722,9 +722,12 @@ def test_build_task_group_deco_context_manager(dag_maker):
     node_ids = {
         "id": None,
         "children": [
+            {"id": "task_start"},
             {
                 "id": "section_1",
                 "children": [
+                    {"id": "section_1.task_1"},
+                    {"id": "section_1.task_2"},
                     {
                         "id": "section_1.section_2",
                         "children": [
@@ -732,12 +735,9 @@ def test_build_task_group_deco_context_manager(dag_maker):
                             {"id": "section_1.section_2.task_4"},
                         ],
                     },
-                    {"id": "section_1.task_1"},
-                    {"id": "section_1.task_2"},
                 ],
             },
             {"id": "task_end"},
-            {"id": "task_start"},
         ],
     }
 
@@ -943,17 +943,17 @@ def test_call_taskgroup_twice(dag_maker):
             {
                 "id": "task_group1",
                 "children": [
-                    {"id": "task_group1.end_task"},
                     {"id": "task_group1.start_task"},
                     {"id": "task_group1.task"},
+                    {"id": "task_group1.end_task"},
                 ],
             },
             {
                 "id": "task_group1__1",
                 "children": [
-                    {"id": "task_group1__1.end_task"},
                     {"id": "task_group1__1.start_task"},
                     {"id": "task_group1__1.task"},
+                    {"id": "task_group1__1.end_task"},
                 ],
             },
         ],
@@ -1203,6 +1203,72 @@ def test_topological_sort_serialized_padded_reverse_chain_uses_pass_numbering(mo
     assert set(position) == {*(f"r{i}" for i in range(80)), *(f"i{i}" for i in range(80))}
     for i in range(79):
         assert position[f"r{i}"] < position[f"r{i + 1}"]
+
+
+def test_topological_sort_serialized_projects_descendant_dependencies():
+    with DAG("serialized_descendant_dependency", schedule=None, start_date=DEFAULT_DATE) as dag:
+        with TaskGroup("dependent_group"):
+            dependent = EmptyOperator(task_id="dependent")
+        upstream = EmptyOperator(task_id="upstream")
+        upstream >> dependent
+
+    serialized = create_scheduler_dag(dag)
+    expected = ["upstream", "dependent_group"]
+    assert [node.node_id for node in serialized.task_group.topological_sort()] == expected
+    assert [node["id"] for node in task_group_to_dict_grid(serialized.task_group)["children"]] == expected
+    assert [node["id"] for node in task_group_to_dict(serialized.task_group)["children"]] == expected
+
+
+def test_topological_sort_serialized_uses_dag_task_order_for_ties():
+    with DAG("serialized_declaration_order", schedule=None, start_date=DEFAULT_DATE) as dag:
+        with TaskGroup("z_group"):
+            EmptyOperator(task_id="first")
+        with TaskGroup("a_group"):
+            EmptyOperator(task_id="second")
+        EmptyOperator(task_id="third")
+
+    serialized = create_scheduler_dag(dag)
+    assert [node.node_id for node in serialized.task_group.topological_sort()] == [
+        "z_group",
+        "a_group",
+        "third",
+    ]
+
+
+def test_topological_sort_serialized_condenses_presentation_only_group_cycles():
+    with DAG("serialized_collapsed_group_cycle", schedule=None, start_date=DEFAULT_DATE) as dag:
+        downstream = EmptyOperator(task_id="downstream")
+        with TaskGroup("group_a"):
+            a1 = EmptyOperator(task_id="a1")
+            a2 = EmptyOperator(task_id="a2")
+        upstream = EmptyOperator(task_id="upstream")
+        with TaskGroup("group_b"):
+            b1 = EmptyOperator(task_id="b1")
+            b2 = EmptyOperator(task_id="b2")
+
+        a1 >> b1 >> downstream
+        b2 >> a2
+        upstream >> a2
+
+    serialized = create_scheduler_dag(dag)
+    assert [node.node_id for node in serialized.task_group.topological_sort()] == [
+        "upstream",
+        "group_a",
+        "group_b",
+        "downstream",
+    ]
+
+
+def test_topological_sort_serialized_partial_subset_preserves_dag_task_order():
+    task_ids = [f"task_{i:02d}" for i in range(19, -1, -1)]
+    with DAG("serialized_partial_subset_order", schedule=None, start_date=DEFAULT_DATE) as dag:
+        upstream_tasks = [EmptyOperator(task_id=task_id) for task_id in task_ids]
+        sink = EmptyOperator(task_id="sink")
+        upstream_tasks >> sink
+
+    serialized = create_scheduler_dag(dag)
+    subset = serialized.partial_subset("sink", include_upstream=True)
+    assert list(subset.task_dict) == [*task_ids, "sink"]
 
 
 def test_task_group_arrow_with_setup_group():

@@ -1117,3 +1117,39 @@ def test_topological_sort_padded_reverse_chain_uses_pass_numbering(monkeypatch):
 
     assert called["value"]
     _assert_valid_topological_order(dag.task_group, order)
+
+
+def test_topological_sort_projects_dependencies_from_descendant_tasks():
+    with DAG("descendant_dependency", schedule=None, start_date=DEFAULT_DATE) as dag:
+        with TaskGroup("dependent_group"):
+            dependent = EmptyOperator(task_id="dependent")
+        upstream = EmptyOperator(task_id="upstream")
+        upstream >> dependent
+
+    assert [node.node_id for node in dag.task_group.topological_sort()] == [
+        "upstream",
+        "dependent_group",
+    ]
+
+
+def test_topological_sort_condenses_presentation_only_group_cycles():
+    with DAG("collapsed_group_cycle", schedule=None, start_date=DEFAULT_DATE) as dag:
+        downstream = EmptyOperator(task_id="downstream")
+        with TaskGroup("group_a"):
+            a1 = EmptyOperator(task_id="a1")
+            a2 = EmptyOperator(task_id="a2")
+        upstream = EmptyOperator(task_id="upstream")
+        with TaskGroup("group_b"):
+            b1 = EmptyOperator(task_id="b1")
+            b2 = EmptyOperator(task_id="b2")
+
+        a1 >> b1 >> downstream
+        b2 >> a2
+        upstream >> a2
+
+    assert [node.node_id for node in dag.task_group.topological_sort()] == [
+        "upstream",
+        "group_a",
+        "group_b",
+        "downstream",
+    ]

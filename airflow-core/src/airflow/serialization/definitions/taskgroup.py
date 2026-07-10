@@ -22,11 +22,12 @@ import functools
 import operator
 import weakref
 from collections import deque
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import attrs
 import methodtools
 
+from airflow._shared.dagnode.task_group_sort import resolve_task_group_projection_cycle
 from airflow.serialization.definitions.node import DAGNode
 
 if TYPE_CHECKING:
@@ -219,18 +220,30 @@ class SerializedTaskGroup(DAGNode):
         """
         Sort children topologically — a task always comes after its upstream dependencies.
 
-        See ``TaskGroup.topological_sort`` in task-sdk for the algorithm. Cycles are
-        treated as corrupt input: ``DAG.check_cycle`` rejects cyclic Dags before
-        serialization, so a cycle reaching this code indicates malformed serialized data,
-        and we raise ``ValueError`` rather than silently looping forever.
+        See ``TaskGroup.topological_sort`` in task-sdk for the algorithm. Genuine task cycles
+        are treated as corrupt input; cycles introduced only by collapsing interleaved
+        TaskGroups are ordered as strongly connected components.
         """
         children = self.children
         if not children:
             return []
 
-        nodes = list(children.values())
+        task_positions = {task_id: position for position, task_id in enumerate(self.dag.task_dict)}
+        child_positions = {id(child): position for position, child in enumerate(children.values())}
+
+        def node_position(node: DAGNode) -> tuple[int, str]:
+            if isinstance(node, SerializedTaskGroup):
+                position = min(
+                    (task_positions[task.task_id] for task in node.iter_tasks()),
+                    default=len(task_positions) + child_positions[id(node)],
+                )
+            else:
+                position = task_positions[cast("SerializedOperator", node).task_id]
+            return position, str(node.node_id)
+
+        nodes = sorted(children.values(), key=node_position)
         n = len(nodes)
-        id_to_idx = {nid: i for i, nid in enumerate(children)}
+        id_to_idx = {node.node_id: i for i, node in enumerate(nodes)}
 
         projected: list[tuple[int, ...]] = [()] * n
         nodes_with_back_edge = 0
@@ -250,7 +263,11 @@ class SerializedTaskGroup(DAGNode):
     def _project_child_deps(
         self, child_idx: int, child: DAGNode, id_to_idx: dict[str, int]
     ) -> tuple[int, ...]:
-        upstream_ids = child.upstream_task_ids
+        upstream_ids = (
+            {upstream_id for task in child.iter_tasks() for upstream_id in task.upstream_task_ids}
+            if isinstance(child, SerializedTaskGroup)
+            else child.upstream_task_ids
+        )
         if not upstream_ids:
             return ()
         sib_deps: set[int] = set()
@@ -304,7 +321,13 @@ class SerializedTaskGroup(DAGNode):
                 emitted[i] = 1
                 order_append(nodes[i])
             if len(next_pending) == len(pending):
-                raise ValueError(f"A cyclic dependency occurred in dag: {self.dag_id}")
+                return resolve_task_group_projection_cycle(
+                    dag=self.dag,
+                    tasks=tuple(self.iter_tasks()),
+                    nodes=nodes,
+                    projected=projected,
+                    cycle_exception=ValueError,
+                )
             pending = next_pending
         return order
 
@@ -339,7 +362,13 @@ class SerializedTaskGroup(DAGNode):
                     queue.append(s)
 
         if processed != n:
-            raise ValueError(f"A cyclic dependency occurred in dag: {self.dag_id}")
+            return resolve_task_group_projection_cycle(
+                dag=self.dag,
+                tasks=tuple(self.iter_tasks()),
+                nodes=nodes,
+                projected=projected,
+                cycle_exception=ValueError,
+            )
 
         sorted_indices = sorted(range(n), key=lambda i: (pass_of[i], i))
         return [nodes[i] for i in sorted_indices]

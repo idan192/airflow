@@ -975,9 +975,13 @@ class DAG:
             return copy.deepcopy(t, memo)
 
         # Compiling the unique list of tasks that made the cut
+        included_task_ids = {
+            task.task_id for task in itertools.chain(matched_tasks, also_include, direct_upstreams)
+        }
         dag.task_dict = {
-            t.task_id: _deepcopy_task(t)
-            for t in itertools.chain(matched_tasks, also_include, direct_upstreams)
+            task_id: _deepcopy_task(task)
+            for task_id, task in self.task_dict.items()
+            if task_id in included_task_ids
         }
 
         def filter_task_group(group, parent_group):
